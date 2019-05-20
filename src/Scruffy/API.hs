@@ -13,8 +13,8 @@ import           Scruffy.Service
 
 import           Servant
 
-type AlbumsEndpoint = QueryParam "name" T.Text
-    :> QueryParam "page" Int :> QueryParam "itemsPerPage" Int
+type AlbumsEndpoint = QueryParam "name" T.Text :> QueryParam "page" Int
+    :> QueryParam "itemsPerPage" Int :> QueryParam "ratingLower" Double
     :> Get '[JSON] (SearchResult Album)
 
 type BandsEndpoint = QueryParam "name" T.Text
@@ -45,13 +45,13 @@ bandsServer svc =
 
 albumsServer :: Service a => a -> Server AlbumsAPI
 albumsServer svc =
-    let albumsEndpoint aN mP mIPP = liftIO $
+    let albumsEndpoint aN mP mIPP mRL = liftIO $
             searchAlbums svc $
             AlbumSearchRequest { getAlbumSearchBase = SearchRequest mP mIPP aN
                                , getAlbumSearchYearLower = Nothing
                                , getAlbumSearchYearUpper = Nothing
                                , getAlbumSearchIncludeUnknownYear = Nothing
-                               , getAlbumSearchRatingLower = Nothing
+                               , getAlbumSearchRatingLower = mRL
                                , getAlbumSearchRatingUpper = Nothing
                                , getAlbumSearchSortColumn = Nothing
                                }

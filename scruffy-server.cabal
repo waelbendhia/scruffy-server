@@ -62,7 +62,12 @@ executable scruffy-server
   -- other-extensions:    
   
   default-extensions:  OverloadedStrings
-  ghc-options:         -W -Wall -Werror -fwarn-incomplete-patterns -O2 -optc-O3
+  ghc-options:         -W
+                       -Wall
+                       -Werror
+                       -fwarn-incomplete-patterns
+                       -O3
+                       -optc-O3
   -- Other library packages from which modules are imported.
   build-depends:       base >=4.12,
                        data-default,
@@ -76,7 +81,8 @@ executable scruffy-server
                        scalpel >= 0.6.0 && <= 0.7.0,
                        network-uri,
                        lens,
-                       postgresql-simple,
+                       beam-core,
+                       beam-postgres,
                        mtl,
                        resource-pool,
                        servant,
