@@ -6,7 +6,6 @@ module Scruffy.Service
     ) where
 
 import           Data.Maybe
-import Data.String
 import           Data.Text          as T
 
 import qualified Scruffy.Data       as SD
@@ -31,7 +30,8 @@ data AlbumSearchRequest =
                        , getAlbumSearchIncludeUnknownYear :: Maybe Bool
                        , getAlbumSearchRatingLower :: Maybe Double
                        , getAlbumSearchRatingUpper :: Maybe Double
-                       , getAlbumSearchSortColumn :: Maybe Text
+                       , getAlbumSearchSortColumn
+                             :: Maybe (R.Sorting R.SortColumn)
                        }
 
 convertASR :: AlbumSearchRequest -> R.AlbumSearchRequest
@@ -42,7 +42,7 @@ convertASR (AlbumSearchRequest base yL yU yUn rL rU sC) =
                          , fromMaybe True yUn
                          )
                          (fromMaybe 0 rL, fromMaybe 10 rU)
-                         (maybe R.Rating (fromString . unpack ) sC)
+                         (fromMaybe (R.Sorting R.Rating R.Desc) sC)
 
 class Service a where
     searchBands :: a -> SearchRequest -> IO (SD.SearchResult SD.Band)

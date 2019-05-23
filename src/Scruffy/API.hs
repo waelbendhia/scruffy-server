@@ -9,6 +9,7 @@ import           Control.Monad.Reader
 import           Data.Text            as T
 
 import           Scruffy.Data
+import qualified Scruffy.Repository   as R
 import           Scruffy.Service
 
 import           Servant
@@ -16,9 +17,8 @@ import           Servant
 type AlbumsEndpoint = QueryParam "name" T.Text :> QueryParam "page" Int
     :> QueryParam "itemsPerPage" Int :> QueryParam "ratingLower" Double
     :> QueryParam "ratingUpper" Double :> QueryParam "yearLower" Int
-    :> QueryParam "yearUpper" Int
-    :> QueryParam "includeUnknown" Bool
-    :> QueryParam "sortBy" Text
+    :> QueryParam "yearUpper" Int :> QueryParam "includeUnknown" Bool
+    :> QueryParam "sortBy" (R.Sorting R.SortColumn)
     :> Get '[JSON] (SearchResult Album)
 
 type BandsEndpoint = QueryParam "name" T.Text
