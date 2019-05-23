@@ -1,7 +1,5 @@
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE Arrows #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Scruffy.Repository
@@ -13,82 +11,72 @@ module Scruffy.Repository
     , AlbumSearchRequest(..)
     ) where
 
-import           Control.Lens           as L
+import           Control.Arrow
 
+import           Data.Int
+import           Data.Maybe
 import           Data.Pool
+import           Data.Profunctor.Product
 import           Data.String
-import           Data.Text              as T
+import           Data.Text                  as T
 
-import           Database.Beam
-import           Database.Beam.Postgres
+import           Database.PostgreSQL.Simple
 
-import qualified Scruffy.Data           as SD
+import           Opaleye                    as O
 
-data BandT f =
-    Band { _bandUrl      :: Columnar f Text
-         , _bandName     :: Columnar f Text
-         , _bandBio      :: Columnar f (Maybe Text)
-         , _bandImageUrl :: Columnar f (Maybe Text)
-         }
-    deriving Generic
+import qualified Scruffy.Data               as SD
 
-instance Beamable BandT
+type BandRow =
+    ( Field SqlText
+    , Field SqlText
+    , FieldNullable SqlText
+    , FieldNullable SqlText
+    )
 
-instance Table BandT where
-    data PrimaryKey BandT f = BandId (Columnar f Text)
-            deriving ( Generic, Beamable )
+bandTable :: Table BandRow BandRow
+bandTable =
+    table "bands"
+          (p4 ( tableField "partialurl"
+              , tableField "name"
+              , tableField "bio"
+              , tableField "imageurl"
+              ))
 
-    primaryKey = BandId . _bandUrl
+type AlbumRow =
+    ( Field SqlText
+    , FieldNullable SqlInt4
+    , Field SqlFloat8
+    , Field SqlText
+    , FieldNullable SqlText
+    )
 
-data AlbumT f =
-    Album { _albumName     :: Columnar f Text
-          , _albumYear     :: Columnar f (Maybe Int)
-          , _albumRating   :: Columnar f Double
-          , _albumBand     :: Columnar f Text
-          , _albumImageUrl :: Columnar f (Maybe Text)
-          }
-    deriving Generic
+albumTable :: Table AlbumRow AlbumRow
+albumTable =
+    table "albums"
+          (p5 ( tableField "name"
+              , tableField "year"
+              , tableField "rating"
+              , tableField "band"
+              , tableField "imageurl"
+              ))
 
-type Album = AlbumT Identity
+bandSelect :: Select BandRow
+bandSelect = selectTable bandTable
 
-convertAlbum :: Album -> SD.Album
-convertAlbum a =
-    SD.Album (_albumName a)
-             (_albumYear a)
-             (_albumRating a)
-             (Just $ SD.Band (_albumBand a) "" Nothing Nothing [] [])
-             (_albumImageUrl a)
+albumSelect :: Select AlbumRow
+albumSelect = selectTable albumTable
 
-instance Beamable AlbumT
+restrictName :: Text -> QueryArr (Column PGText) ()
+restrictName n = proc name -> restrict -< name
+    `ilike` sqlStrictText (T.concat [ "%", n, "%" ])
 
-instance Table AlbumT where
-    data PrimaryKey AlbumT f = AlbumId (Columnar f Text)
-            deriving ( Generic, Beamable )
+paginate :: Int -> Int -> Select a -> Select a
+paginate p ipp = limit ipp
+    . offset (p * ipp)
 
-    primaryKey = AlbumId . _albumName
-
-data ScaruffiDb f =
-    ScaruffiDb { _scaruffiBands  :: f (TableEntity BandT)
-               , _scaruffiAlbums :: f (TableEntity AlbumT)
-               }
-    deriving ( Generic, Database be )
-
-scaruffiDb :: DatabaseSettings be ScaruffiDb
-scaruffiDb =
-    let albumModification =
-            tableModification { _albumBand     = fieldNamed "band"
-                              , _albumImageUrl = fieldNamed "imageurl"
-                              }
-        bandModification =
-            tableModification { _bandUrl      = fieldNamed "partialurl"
-                              , _bandImageUrl = fieldNamed "imageurl"
-                              }
-    in withDbModification defaultDbSettings $
-       dbModification { _scaruffiAlbums = setEntityName "albums"
-                            <> modifyTableFields albumModification
-                      , _scaruffiBands  = setEntityName "bands"
-                            <> modifyTableFields bandModification
-                      }
+aggCount :: Select (Column a)
+         -> Select (Column SqlInt8)
+aggCount = aggregate O.count
 
 class Repository a where
     searchAlbums :: a -> AlbumSearchRequest -> IO ([SD.Album], Int)
@@ -126,6 +114,24 @@ connectPGRepo info = PGRepo <$>
 withConn :: PGRepo -> (Connection -> IO b) -> IO b
 withConn repo = withResource (unRepo repo)
 
+fst3 :: (a, b, c) -> a
+fst3 (x, _, _) = x
+
+fst6 :: (a, b, c, d, e, f) -> a
+fst6 (x, _, _, _, _, _) = x
+
+snd6 :: (a, b, c, d, e, f) -> b
+snd6 (_, x, _, _, _, _) = x
+
+trd6 :: (a, b, c, d, e, f) -> c
+trd6 (_, _, x, _, _, _) = x
+
+sxt6 :: (a, b, c, d, e, f) -> f
+sxt6 (_, _, _, _, _, x) = x
+
+snd3 :: (a, b, c) -> b
+snd3 (_, x, _) = x
+
 instance Repository PGRepo where
     searchAlbums repo
                  AlbumSearchRequest{ getAlbumSearchRating = (rLower, rUpper)
@@ -135,81 +141,100 @@ instance Repository PGRepo where
                                    , getAlbumSearchBase =
                                          SearchRequest p ipp name
                                    } =
-        let similar_ c t
-                | T.null t = val_ True
-                | otherwise = lower_ c
-                    `like_` val_ (T.concat [ "%", T.toLower t, "%" ])
-            sortQuery = case sColumn of
-                Rating -> orderBy_ (desc_ . _albumRating . fst)
-                AlbumName -> orderBy_ (asc_ . _albumName . fst)
-                BandName -> orderBy_ (asc_ . snd)
-                Year -> orderBy_ (desc_ . _albumYear . fst)
-            albumsQuery =
-                do album <- all_ $ _scaruffiAlbums scaruffiDb
-                   band <- all_ $ _scaruffiBands scaruffiDb
-                   guard_ (between_ (_albumRating album)
-                                    (val_ rLower)
-                                    (val_ rUpper))
-                   guard_ (maybe_ (val_ includeUnknown)
-                                  (\y -> between_ y (val_ yLower) (val_ yUpper))
-                                  (_albumYear album))
-                   guard_ (_bandName band `similar_` name ||. _albumName album
-                           `similar_` name)
-                   guard_ (_bandUrl band ==. _albumBand album)
-                   pure (album, _bandName band)
-            countQuery =
-                do album <- all_ $ _scaruffiAlbums scaruffiDb
-                   band <- all_ $ _scaruffiBands scaruffiDb
-                   guard_ (between_ (_albumRating album)
-                                    (val_ rLower)
-                                    (val_ rUpper))
-                   guard_ (maybe_ (val_ includeUnknown)
-                                  (\y -> between_ y (val_ yLower) (val_ yUpper))
-                                  (_albumYear album))
-                   guard_ (_bandName band `similar_` name ||. _albumName album
-                           `similar_` name)
-                   guard_ (_bandUrl band ==. _albumBand album)
-                   pure (album, _bandName band)
+        let searchTerm = sqlStrictText (T.concat [ "%", name, "%" ])
+            baseQuery = proc () ->
+                do (albumName, y, rating, band, i) <- albumSelect -< ()
+                   (bandURL, bandName, _, _) <- bandSelect -< ()
+                   restrict -< bandURL .== band
+                   restrict -< bandName `ilike` searchTerm .|| albumName
+                       `ilike` searchTerm
+                   restrict -< rating .>= sqlDouble rLower .&& rating
+                       .<= sqlDouble rUpper
+                   let year = ifThenElse (matchNullable (sqlBool False)
+                                                        (.== sqlInt4 0)
+                                                        y)
+                                         O.null
+                                         y
+                   restrict
+                       -< matchNullable (sqlBool False)
+                                        (\year' -> year' .>= sqlInt4 yLower
+                                         .&& year'
+                                         .<= sqlInt4 yUpper)
+                                        year
+                       .|| (isNull year .&& sqlBool includeUnknown)
+                   returnA -< (albumName, year, rating, band, i, bandName)
+            countQuery = aggCount $ fst6 <$> baseQuery
+            sorter = orderBy $
+                case sColumn of
+                    AlbumName -> asc fst6
+                    Year -> desc snd6
+                    Rating -> desc trd6
+                    BandName -> asc sxt6
+            searchQuery = paginate p ipp $ sorter baseQuery
+            conv :: Int64 -> Int
+            conv = fromIntegral
         in repo
-           `withConn` \conn -> runBeamPostgres conn $
-           do albums <- runSelectReturningList $
-                  select $
-                  limit_ (fromIntegral ipp) $
-                  offset_ (fromIntegral $ p * ipp) $
-                  sortQuery albumsQuery
-              Just c <- runSelectReturningOne $
-                  select $
-                  aggregate_ (\_ -> as_ @Int countAll_) $
-                  countQuery
-              pure ( (\(a, b) ->
-                      L.set (SD.band . _Just . SD.name) b (convertAlbum a)) <$>
-                         albums
-                   , c
+           `withConn` \conn ->
+           do as <- runQuery conn searchQuery
+              xs <- runQuery conn countQuery
+              pure ( (\(albumName, year, rating, bandURL, imageURL, bandName) ->
+                      SD.Album albumName
+                               year
+                               rating
+                               (Just $
+                                SD.Band bandURL bandName Nothing Nothing [] [])
+                               imageURL) <$>
+                         as
+                   , maybe 0 conv $ listToMaybe xs
                    )
 
     searchBands repo (SearchRequest p ipp n) =
-        let similar_ c t
-                | T.null t = val_ True
-                | otherwise = lower_ c
-                    `like_` val_ (T.concat [ "%", T.toLower t, "%" ])
-            bandsQuery =
-                do b <- limit_ (fromIntegral ipp) $
-                       offset_ (fromIntegral $ ipp * p) $
-                       filter_ ((`similar_` n) . _bandName) $
-                       orderBy_ (asc_ . _bandName) $
-                       all_ $
-                       _scaruffiBands scaruffiDb
-                   pure (_bandName b, _bandUrl b, _bandImageUrl b)
-            countQuery = aggregate_ (const $ as_ @Int countAll_) $
-                filter_ ((`similar_` n) . _bandName) $
-                all_ $
-                _scaruffiBands scaruffiDb
-            thrupleToBand (bn, url, i) = SD.Band bn url Nothing i [] []
+        let baseQuery = proc () ->
+                do (url, name, _, image) <- bandSelect -< ()
+                   restrictName n -< name
+                   returnA -< (url, name, image)
+            countQuery = aggCount $ fst3 <$> baseQuery
+            searchQuery = paginate p ipp $
+                orderBy (asc snd3) baseQuery
+            conv :: Int64 -> Int
+            conv = fromIntegral
         in repo
-           `withConn` \conn -> runBeamPostgres conn $
-           do bs <- runSelectReturningList $ select bandsQuery
-              Just c <- runSelectReturningOne $ select countQuery
-              pure (thrupleToBand <$> bs, c)
+           `withConn` \conn ->
+           do bs <- runQuery conn searchQuery
+              xs <- runQuery conn countQuery
+              pure ( (\(url, name, image) ->
+                      SD.Band url name Nothing image [] []) <$>
+                         bs
+                   , maybe 0 conv $ listToMaybe xs
+                   )
 
-    getBand _ _ = pure Nothing
+    getBand repo partialURL =
+        let bandQuery = proc () ->
+                do row@(url, _, _, _) <- bandSelect -< ()
+                   restrict -< url .== pgStrictText partialURL
+                   returnA -< row
+            albumsQuery = proc () ->
+                do (n, y, r, band, i) <- albumSelect -< ()
+                   restrict -< band .== pgStrictText partialURL
+                   let year = ifThenElse (matchNullable (sqlBool False)
+                                                        (.== sqlInt4 0)
+                                                        y)
+                                         O.null
+                                         y
+                   returnA -< (n, year, r, i)
+        in repo
+           `withConn` \conn ->
+           do b <- runQuery conn bandQuery
+              mapM (\(url, name, bio, imageURL) ->
+                    do as <- runQuery conn albumsQuery
+                       pure $
+                           SD.Band url
+                                   name
+                                   bio
+                                   imageURL
+                                   []
+                                   ((\(n, y, r, i) ->
+                                     SD.Album n y r Nothing i) <$>
+                                    as))
+                   (listToMaybe b)
 

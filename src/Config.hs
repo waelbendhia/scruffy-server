@@ -6,11 +6,11 @@ module Config ( DBConfig(..), Config(..), readConf ) where
 import           Data.Aeson
 import           Data.Yaml
 
-import           Database.Beam.Postgres
+import           Database.PostgreSQL.Simple
 
 import           GHC.Generics
 
-import           System.Console.CmdArgs as C
+import           System.Console.CmdArgs     as C
 
 newtype DBConfig = DBConfig { unConfig :: ConnectInfo }
     deriving ( Show, Generic )

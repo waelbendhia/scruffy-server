@@ -15,6 +15,10 @@ import           Servant
 
 type AlbumsEndpoint = QueryParam "name" T.Text :> QueryParam "page" Int
     :> QueryParam "itemsPerPage" Int :> QueryParam "ratingLower" Double
+    :> QueryParam "ratingUpper" Double :> QueryParam "yearLower" Int
+    :> QueryParam "yearUpper" Int
+    :> QueryParam "includeUnknown" Bool
+    :> QueryParam "sortBy" Text
     :> Get '[JSON] (SearchResult Album)
 
 type BandsEndpoint = QueryParam "name" T.Text
@@ -45,15 +49,15 @@ bandsServer svc =
 
 albumsServer :: Service a => a -> Server AlbumsAPI
 albumsServer svc =
-    let albumsEndpoint aN mP mIPP mRL = liftIO $
+    let albumsEndpoint aN mP mIPP mRL mRU mYL mYU mIU sColumn = liftIO $
             searchAlbums svc $
             AlbumSearchRequest { getAlbumSearchBase = SearchRequest mP mIPP aN
-                               , getAlbumSearchYearLower = Nothing
-                               , getAlbumSearchYearUpper = Nothing
-                               , getAlbumSearchIncludeUnknownYear = Nothing
+                               , getAlbumSearchYearLower = mYL
+                               , getAlbumSearchYearUpper = mYU
+                               , getAlbumSearchIncludeUnknownYear = mIU
                                , getAlbumSearchRatingLower = mRL
-                               , getAlbumSearchRatingUpper = Nothing
-                               , getAlbumSearchSortColumn = Nothing
+                               , getAlbumSearchRatingUpper = mRU
+                               , getAlbumSearchSortColumn = sColumn
                                }
     in albumsEndpoint
 
