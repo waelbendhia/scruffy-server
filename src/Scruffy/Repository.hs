@@ -237,11 +237,9 @@ instance Repository PGRepo where
                    restrict -< band .== pgStrictText partialURL
                    let year' = ifThenElse (year .== nullInt4 0) O.null year
                    returnA -< row & _2 .~ year'
-            populateAlbums conn band =
-                do as <- runQuery conn albumsQuery
-                   pure (set band
-                             SD.albums
-                             ((SD.band .~ Nothing) . convertRowToAlbum <$> as))
+            populateAlbums conn band = (\as -> band & SD.albums .~ as)
+                . fmap ((SD.band .~ Nothing) . convertRowToAlbum) <$>
+                runQuery conn albumsQuery
         in repo
            `withConn` \conn ->
            do b <- runQuery conn bandQuery
