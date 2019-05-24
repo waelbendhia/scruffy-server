@@ -14,7 +14,7 @@ module Scruffy.Repository
     ) where
 
 import           Control.Arrow
-import qualified Control.Lens               as L
+import           Control.Lens               as L
 
 import           Data.Int
 import           Data.Maybe
@@ -37,6 +37,12 @@ type BandRow =
     , FieldNullable SqlText
     )
 
+type BandRowR = (Text, Text, Maybe Text, Maybe Text)
+
+convertRowToBand :: BandRowR -> SD.Band
+convertRowToBand (url, name, bio, imageURL) =
+    SD.Band url name bio imageURL [] []
+
 bandTable :: Table BandRow BandRow
 bandTable =
     table "bands"
@@ -54,6 +60,16 @@ type AlbumRow =
     , FieldNullable SqlText
     )
 
+type AlbumRowR = (Text, Maybe Int, Double, Text, Maybe Text)
+
+convertRowToAlbum :: AlbumRowR -> SD.Album
+convertRowToAlbum (name, year, rating, bandURL, imageURL) =
+    SD.Album name
+             year
+             rating
+             (Just $ SD.Band bandURL "" Nothing Nothing [] [])
+             imageURL
+
 albumTable :: Table AlbumRow AlbumRow
 albumTable =
     table "albums"
@@ -70,9 +86,14 @@ bandSelect = selectTable bandTable
 albumSelect :: Select AlbumRow
 albumSelect = selectTable albumTable
 
-restrictName :: Text -> QueryArr (Column PGText) ()
-restrictName n = proc name -> restrict -< name
-    `ilike` sqlStrictText (T.concat [ "%", n, "%" ])
+(.=~) :: Column PGText -> Text -> Column PGBool
+(.=~) a b = a `O.ilike` sqlStrictText (T.concat [ "%", b, "%" ])
+
+nullInt4 :: Int -> Column (Nullable PGInt4)
+nullInt4 = toNullable . sqlInt4
+
+between :: PGOrd a => Column a -> Column a -> Column a -> Column PGBool
+between x a b = x .>= a .&& x .<= b
 
 paginate :: Int -> Int -> Select a -> Select a
 paginate p ipp = limit ipp
@@ -150,120 +171,79 @@ connectPGRepo info = PGRepo <$>
 withConn :: PGRepo -> (Connection -> IO b) -> IO b
 withConn repo = withResource (unRepo repo)
 
-fst3 :: (a, b, c) -> a
-fst3 (x, _, _) = x
-
-fst6 :: (a, b, c, d, e, f) -> a
-fst6 (x, _, _, _, _, _) = x
-
-snd6 :: (a, b, c, d, e, f) -> b
-snd6 (_, x, _, _, _, _) = x
-
-trd6 :: (a, b, c, d, e, f) -> c
-trd6 (_, _, x, _, _, _) = x
-
-sxt6 :: (a, b, c, d, e, f) -> f
-sxt6 (_, _, _, _, _, x) = x
-
-snd3 :: (a, b, c) -> b
-snd3 (_, x, _) = x
-
 instance Repository PGRepo where
     searchAlbums repo
                  AlbumSearchRequest{ getAlbumSearchRating = (rLower, rUpper)
                                    , getAlbumSearchYear =
                                          (yLower, yUpper, includeUnknown)
                                    , getAlbumSearchSorting = sorting
-                                   , getAlbumSearchBase =
-                                         SearchRequest p ipp name
+                                   , getAlbumSearchBase = SearchRequest p ipp n
                                    } =
-        let searchTerm = sqlStrictText (T.concat [ "%", name, "%" ])
-            baseQuery = proc () ->
-                do (albumName, y, rating, albumBand, i) <- albumSelect -< ()
+        let baseQuery = proc () ->
+                do row@(albumName, year, rating, albumBand, _)
+                       <- albumSelect -< ()
                    (bandURL, bandName, _, _) <- bandSelect -< ()
                    restrict -< bandURL .== albumBand
-                   restrict -< bandName `ilike` searchTerm .|| albumName
-                       `ilike` searchTerm
-                   restrict -< rating .>= sqlDouble rLower .&& rating
-                       .<= sqlDouble rUpper
-                   let year = ifThenElse (matchNullable (sqlBool False)
-                                                        (.== sqlInt4 0)
-                                                        y)
-                                         O.null
-                                         y
+                   restrict -< bandName .=~ n .|| albumName .=~ n
                    restrict
-                       -< matchNullable (sqlBool False)
-                                        (\year' -> year' .>= sqlInt4 yLower
-                                         .&& year'
-                                         .<= sqlInt4 yUpper)
-                                        year
-                       .|| (isNull year .&& sqlBool includeUnknown)
-                   returnA -< (albumName, year, rating, albumBand, i, bandName)
-            countQuery = aggCount $ fst6 <$> baseQuery
+                       -< between rating (sqlDouble rLower) (sqlDouble rUpper)
+                   let year' = ifThenElse (year .== nullInt4 0) O.null year
+                   restrict
+                       -< between year' (nullInt4 yLower) (nullInt4 yUpper)
+                       .|| (isNull year' .&& sqlBool includeUnknown)
+                   returnA -< (row & _2 .~ year', bandName)
             sorter =
                 let Sorting column order = sorting
                     direction Asc = O.asc
                     direction Desc = O.desc
                 in orderBy $
                    case column of
-                       AlbumName -> direction order fst6
-                       Year -> direction order snd6
-                       Rating -> direction order trd6
-                       BandName -> direction order sxt6
-            searchQuery = paginate p ipp $ sorter baseQuery
-            convertResult (an, y, r, bURL, iURL, bn) =
-                SD.Album an
-                         y
-                         r
-                         (Just $ SD.Band bURL bn Nothing Nothing [] [])
-                         iURL
+                       AlbumName -> direction order (^. _1 . _1)
+                       Year -> direction order (^. _1 . _2)
+                       Rating -> direction order (^. _1 . _3)
+                       BandName -> direction order (^. _2)
+            convertResult (albumRow, bandName) = convertRowToAlbum albumRow
+                & SD.band . _Just . SD.name .~ bandName
         in repo
            `withConn` \conn ->
-           do as <- runQuery conn searchQuery
-              xs <- runQuery conn countQuery
+           do as <- runQuery conn $ paginate p ipp $ sorter baseQuery
+              xs <- runQuery conn $ aggCount $ (^. _1 . _1) <$> baseQuery
               pure ( convertResult <$> as
                    , maybe 0 (fromIntegral :: Int64 -> Int) $ listToMaybe xs
                    )
 
     searchBands repo (SearchRequest p ipp n) =
         let baseQuery = proc () ->
-                do (url, name, _, image) <- bandSelect -< ()
-                   restrictName n -< name
-                   returnA -< (url, name, image)
-            countQuery = aggCount $ fst3 <$> baseQuery
-            searchQuery = paginate p ipp $
-                orderBy (asc snd3) baseQuery
-            convertResult (url, n', i) = SD.Band url n' Nothing i [] []
+                do row@(_, name, _, _) <- bandSelect -< ()
+                   restrict -< name .=~ n
+                   returnA -< row & _3 .~ (O.null :: Column (Nullable SqlText))
         in repo
            `withConn` \conn ->
-           do bs <- runQuery conn searchQuery
-              xs <- runQuery conn countQuery
-              pure ( convertResult <$> bs
+           do bs <- runQuery conn $
+                  paginate p ipp $
+                  orderBy (asc (^. _2)) baseQuery
+              xs <- runQuery conn $ aggCount $ (^. _1) <$> baseQuery
+              pure ( convertRowToBand <$> bs
                    , maybe 0 (fromIntegral :: Int64 -> Int) $ listToMaybe xs
                    )
 
     getBand repo partialURL =
         let bandQuery = proc () ->
-                do row@(url, _, _, _) <- bandSelect -< ()
-                   restrict -< url .== pgStrictText partialURL
+                do row <- bandSelect -< ()
+                   restrict -< row ^. _1 .== pgStrictText partialURL
                    returnA -< row
             albumsQuery = proc () ->
-                do (n, y, r, band, i) <- albumSelect -< ()
+                do row@(_, year, _, band, _) <- albumSelect -< ()
                    restrict -< band .== pgStrictText partialURL
-                   let year = ifThenElse (matchNullable (sqlBool False)
-                                                        (.== sqlInt4 0)
-                                                        y)
-                                         O.null
-                                         y
-                   returnA -< (n, year, r, i)
-            convertBand (url, name, bio, imageURL) =
-                SD.Band url name bio imageURL [] []
-            convertAlbum (n, y, r, i) = SD.Album n y r Nothing i
+                   let year' = ifThenElse (year .== nullInt4 0) O.null year
+                   returnA -< row & _2 .~ year'
             populateAlbums conn band =
                 do as <- runQuery conn albumsQuery
-                   pure $ L.set SD.albums (convertAlbum <$> as) band
+                   pure (set band
+                             SD.albums
+                             ((SD.band .~ Nothing) . convertRowToAlbum <$> as))
         in repo
            `withConn` \conn ->
            do b <- runQuery conn bandQuery
-              mapM (populateAlbums conn . convertBand) $ listToMaybe b
+              mapM (populateAlbums conn . convertRowToBand) $ listToMaybe b
 
