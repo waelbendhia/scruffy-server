@@ -21,12 +21,19 @@ module Scruffy.Data
     ) where
 
 import           Control.Lens
+import           Control.Monad
 
 import           Data.Aeson
 import           Data.Aeson.TH
-import qualified Data.Text     as T
+import           Data.Maybe
+import qualified Data.Text                   as T
 
 import           GHC.Generics
+
+import           Text.Blaze.Html
+import qualified Text.Blaze.Html5            as H
+import qualified Text.Blaze.Html5.Attributes as HA
+import           Text.Blaze.Internal
 
 data Band =
     Band { _url          :: T.Text
@@ -63,3 +70,38 @@ makeFieldsNoPrefix ''Album
 
 sanitizeBand :: Band -> Band
 sanitizeBand b = b & name %~ T.strip & bio . _Just %~ T.strip
+
+bandName :: Album -> Maybe T.Text
+bandName a = fmap (^. name) (a ^. band)
+
+class ToMarkupElem a where
+    toMarkupElem :: a -> H.Html
+
+instance ToMarkupElem Album where
+    toMarkupElem a = H.div $
+        do H.h1 $ toHtml $ a ^. name
+           H.img ! HA.src (H.textValue $ fromMaybe "" $ a ^. imageUrl)
+           maybe (pure ()) (H.h3 . toHtml) (bandName a)
+
+instance ToMarkupElem Band where
+    toMarkupElem b = H.div $
+        do H.h1 $ toHtml $ b ^. name
+           H.img ! HA.src (H.textValue $ fromMaybe "" $ b ^. imageUrl)
+           maybe (pure ()) (H.p . toHtml) (b ^. bio)
+           H.div $ forM_ (b ^. albums) toMarkupElem
+
+instance ToMarkup Band where
+    toMarkup = baseLayout . toMarkupElem
+
+instance ToMarkupElem a => ToMarkup (SearchResult a) where
+    toMarkup (SearchResult xs count) = baseLayout $
+        do H.div $ forM_ xs toMarkupElem
+           H.p $ H.toHtml count
+
+baseLayout :: H.Html -> MarkupM ()
+baseLayout body =
+    do H.link ! HA.href "/styles.css" ! HA.rel "stylesheet"
+       H.header $ H.h1 "Scaruffi2.0"
+       H.body body
+       H.footer "this be a footer"
+

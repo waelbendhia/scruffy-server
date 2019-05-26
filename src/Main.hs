@@ -23,11 +23,11 @@ import           Servant.Server
 import           System.Posix.Signals
 
 waitForStop :: IO b -> IO a -> IO ()
-waitForStop action cleanup =
+waitForStop ioAction cleanup =
     do stopSignal <- newEmptyMVar
        let handler = CatchOnce $ cleanup >>= putMVar stopSignal
        _ <- installHandler sigINT handler Nothing
-       race_ (takeMVar stopSignal) action
+       race_ (takeMVar stopSignal) ioAction
 
 main :: IO ()
 main =

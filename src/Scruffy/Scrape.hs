@@ -15,10 +15,8 @@ import           Text.Printf
 import           Text.Read
 
 getFullURL :: String -> T.Text -> Maybe T.Text
-getFullURL base rel =
-    do f <- parseRelativeReference $ T.unpack rel
-       b <- parseURI base
-       pure $ T.pack $ show $ f `relativeTo` b
+getFullURL base rel = T.pack . show <$>
+    (relativeTo <$> parseRelativeReference (T.unpack rel) <*> parseURI base)
 
 -- |Retrieve list of band URLs for volume
 getVolume :: Int -> IO (S.Set T.Text)
@@ -57,8 +55,7 @@ getAlbums =
                    T.takeWhileEnd (/= ',') n
                pure $ SD.Album name year rating Nothing Nothing
         as = Sc.chroot ("td" Sc.@: [ "bgcolor" Sc.@= "ffddaa" ]) $
-            do text <- Sc.text "td"
-               pure $ album text
+            album <$> Sc.text "td"
     in as <|> pure []
 
 getBand :: Sc.URL -> IO (Maybe SD.Band)

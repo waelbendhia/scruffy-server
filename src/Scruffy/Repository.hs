@@ -30,14 +30,11 @@ import qualified Scruffy.Data               as SD
 
 import           Servant.API
 
-type BandRow =
-    ( Field SqlText
-    , Field SqlText
-    , FieldNullable SqlText
-    , FieldNullable SqlText
-    )
+type BandRow' text maybeText = (text, text, maybeText, maybeText)
 
-type BandRowR = (Text, Text, Maybe Text, Maybe Text)
+type BandRow = BandRow' (Field SqlText) (FieldNullable SqlText)
+
+type BandRowR = BandRow' Text (Maybe Text)
 
 convertRowToBand :: BandRowR -> SD.Band
 convertRowToBand (url, name, bio, imageURL) =
@@ -52,15 +49,13 @@ bandTable =
               , tableField "imageurl"
               ))
 
-type AlbumRow =
-    ( Field SqlText
-    , FieldNullable SqlInt4
-    , Field SqlFloat8
-    , Field SqlText
-    , FieldNullable SqlText
-    )
+type AlbumRow' text maybeText maybeInt float =
+    (text, maybeInt, float, text, maybeText)
 
-type AlbumRowR = (Text, Maybe Int, Double, Text, Maybe Text)
+type AlbumRow =
+    AlbumRow' (Field SqlText) (FieldNullable SqlText) (FieldNullable SqlInt4) (Field SqlFloat8)
+
+type AlbumRowR = AlbumRow' Text (Maybe Text) (Maybe Int) Double
 
 convertRowToAlbum :: AlbumRowR -> SD.Album
 convertRowToAlbum (name, year, rating, bandURL, imageURL) =
@@ -99,9 +94,9 @@ paginate :: Int -> Int -> Select a -> Select a
 paginate p ipp = limit ipp
     . offset (p * ipp)
 
-aggCount :: Select (Column a)
-         -> Select (Column SqlInt8)
-aggCount = aggregate O.count
+extractCount :: Connection -> Select (Column a) -> IO Int
+extractCount c q = maybe 0 (fromIntegral :: Int64 -> Int) . listToMaybe <$>
+    runQuery c (aggregate O.count q)
 
 class Repository a where
     searchAlbums :: a -> AlbumSearchRequest -> IO ([SD.Album], Int)
@@ -122,19 +117,18 @@ data SortColumn = Rating | Year | AlbumName | BandName
 instance FromHttpApiData a => FromHttpApiData (Sorting a) where
     parseQueryParam s = case T.splitOn "," s of
         [column, order] ->
-            do col <- parseQueryParam column
-               dir <- parseQueryParam order
-               Right $ Sorting col dir
-        [column] -> do col <- parseQueryParam column
-                       Right $ Sorting col Desc
+            Sorting <$> parseQueryParam column <*> parseQueryParam order
+        [column] -> (`Sorting` Desc) <$> parseQueryParam column
         _ -> Left $ T.concat [ "could not parse sorter order ", s ]
 
 instance FromHttpApiData SortOrder where
     parseQueryParam "desc" = Right Desc
     parseQueryParam "asc" = Right Asc
     parseQueryParam x = Left $
-        T.concat ([ "unknown order direction '", x, "'. Options are: " ]
-                  ++ [ intercalate ", " [ "asc", "desc" ] ])
+        T.concat [ "unknown order direction '"
+                 , x
+                 , "'. Options are: asc, desc"
+                 ]
 
 instance FromHttpApiData SortColumn where
     parseQueryParam "year" = Right Year
@@ -187,11 +181,10 @@ instance Repository PGRepo where
                    restrict -< bandName .=~ n .|| albumName .=~ n
                    restrict
                        -< between rating (sqlDouble rLower) (sqlDouble rUpper)
-                   let year' = ifThenElse (year .== nullInt4 0) O.null year
                    restrict
-                       -< between year' (nullInt4 yLower) (nullInt4 yUpper)
-                       .|| (isNull year' .&& sqlBool includeUnknown)
-                   returnA -< (row & _2 .~ year', bandName)
+                       -< between year (nullInt4 yLower) (nullInt4 yUpper)
+                       .|| (isNull year .&& sqlBool includeUnknown)
+                   returnA -< (row , bandName)
             sorter =
                 let Sorting column order = sorting
                     direction Asc = O.asc
@@ -204,28 +197,20 @@ instance Repository PGRepo where
                        BandName -> direction order (^. _2)
             convertResult (albumRow, bandName) = convertRowToAlbum albumRow
                 & SD.band . _Just . SD.name .~ bandName
-        in repo
-           `withConn` \conn ->
-           do as <- runQuery conn $ paginate p ipp $ sorter baseQuery
-              xs <- runQuery conn $ aggCount $ (^. _1 . _1) <$> baseQuery
-              pure ( convertResult <$> as
-                   , maybe 0 (fromIntegral :: Int64 -> Int) $ listToMaybe xs
-                   )
+            search conn = fmap convertResult <$>
+                runQuery conn (paginate p ipp $ sorter baseQuery)
+            count' c = extractCount c $ (^. _1 . _1) <$> baseQuery
+        in repo `withConn` \conn -> (,) <$> search conn <*> count' conn
 
     searchBands repo (SearchRequest p ipp n) =
         let baseQuery = proc () ->
                 do row@(_, name, _, _) <- bandSelect -< ()
                    restrict -< name .=~ n
                    returnA -< row & _3 .~ (O.null :: Column (Nullable SqlText))
-        in repo
-           `withConn` \conn ->
-           do bs <- runQuery conn $
-                  paginate p ipp $
-                  orderBy (asc (^. _2)) baseQuery
-              xs <- runQuery conn $ aggCount $ (^. _1) <$> baseQuery
-              pure ( convertRowToBand <$> bs
-                   , maybe 0 (fromIntegral :: Int64 -> Int) $ listToMaybe xs
-                   )
+            search c = fmap convertRowToBand <$>
+                runQuery c (paginate p ipp $ orderBy (asc (^. _2)) baseQuery)
+            count' c = extractCount c $ (^. _1) <$> baseQuery
+        in repo `withConn` \c -> (,) <$> search c <*> count' c
 
     getBand repo partialURL =
         let bandQuery = proc () ->
@@ -233,15 +218,15 @@ instance Repository PGRepo where
                    restrict -< row ^. _1 .== pgStrictText partialURL
                    returnA -< row
             albumsQuery = proc () ->
-                do row@(_, year, _, band, _) <- albumSelect -< ()
+                do row@(_, _, _, band, _) <- albumSelect -< ()
                    restrict -< band .== pgStrictText partialURL
-                   let year' = ifThenElse (year .== nullInt4 0) O.null year
-                   returnA -< row & _2 .~ year'
-            populateAlbums conn band = (\as -> band & SD.albums .~ as)
-                . fmap ((SD.band .~ Nothing) . convertRowToAlbum) <$>
-                runQuery conn albumsQuery
+                   returnA -< row 
+            populateAlbums c band =
+                do asR <- runQuery c albumsQuery
+                   let as = (SD.band .~ Nothing) . convertRowToAlbum <$> asR
+                   pure $ band & SD.albums .~ as
         in repo
-           `withConn` \conn ->
-           do b <- runQuery conn bandQuery
-              mapM (populateAlbums conn . convertRowToBand) $ listToMaybe b
+           `withConn` \c -> runQuery c bandQuery
+           >>= (mapM (populateAlbums c . convertRowToBand) . listToMaybe)
+
 

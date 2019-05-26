@@ -56,6 +56,7 @@ executable scruffy-server
                        Scruffy.Repository,
                        Scruffy.API,
                        Scruffy.Service,
+                       Scruffy.Css,
                        Scruffy.Scrape
   
   -- LANGUAGE extensions used by modules in this package.
@@ -70,6 +71,10 @@ executable scruffy-server
                        -optc-O3
   -- Other library packages from which modules are imported.
   build-depends:       base >=4.12,
+                       http-media,
+                       blaze-html,
+                       servant-blaze,
+                       blaze-markup,
                        data-default,
                        aeson,
                        unix,
@@ -79,6 +84,7 @@ executable scruffy-server
                        async,
                        containers,
                        scalpel >= 0.6.0 && <= 0.7.0,
+                       clay,
                        network-uri,
                        lens,
                        opaleye,
