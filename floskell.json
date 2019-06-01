@@ -4,6 +4,7 @@
     "DefaultSignatures",
     "DeriveGeneric",
     "GeneralizedNewtypeDeriving",
+    "MultiParamTypeClasses",
     "LambdaCase",
     "NamedFieldPuns",
     "OverloadedStrings",

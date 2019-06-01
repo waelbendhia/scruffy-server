@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -8,7 +9,7 @@ module Scruffy.API ( API, api, server ) where
 
 import           Clay
 
-import           Control.Monad.Reader
+import           Control.Monad.Except
 
 import           Data.Text            as T
 
@@ -49,23 +50,19 @@ type API = DynamicAPI :<|> StaticAPI
 api :: Proxy API
 api = Proxy
 
-bandsServer :: Service a => a -> Server BandsAPI
-bandsServer svc =
-    let bandsEndpoint mN mP mIPP =
-            liftIO $ searchBands svc $ SearchRequest mP mIPP mN
+bandsServer :: (MonadError ServantErr m, Service m) => ServerT BandsAPI m
+bandsServer =
+    let bandsEndpoint mN mP mIPP = searchBands $ SearchRequest mP mIPP mN
         bandEndpoint vol path =
-            do res <- liftIO $
-                   getBand svc $
-                   T.concat [ vol, "/", path, ".html" ]
+            do res <- getBand $ T.concat [ vol, "/", path, ".html" ]
                maybe (throwError err404 { errBody = "band not found" })
                      pure
                      res
     in bandsEndpoint :<|> bandEndpoint
 
-albumsServer :: Service a => a -> Server AlbumsAPI
-albumsServer svc =
-    let albumsEndpoint aN mP mIPP mRL mRU mYL mYU mIU sColumn = liftIO $
-            searchAlbums svc $
+albumsServer :: Service m => ServerT AlbumsAPI m
+albumsServer =
+    let albumsEndpoint aN mP mIPP mRL mRU mYL mYU mIU sColumn = searchAlbums $
             AlbumSearchRequest { getAlbumSearchBase = SearchRequest mP mIPP aN
                                , getAlbumSearchYearLower = mYL
                                , getAlbumSearchYearUpper = mYU
@@ -76,12 +73,12 @@ albumsServer svc =
                                }
     in albumsEndpoint
 
-dynamicServer :: Service a => a -> Server DynamicAPI
-dynamicServer svc = bandsServer svc :<|> albumsServer svc
+dynamicServer :: (MonadError ServantErr m, Service m) => ServerT DynamicAPI m
+dynamicServer = bandsServer :<|> albumsServer
 
-staticServer :: Server StaticAPI
+staticServer :: (Monad m, Service m) => ServerT StaticAPI m
 staticServer = pure stylesheet
 
-server :: Service a => a -> Server API
-server svc = dynamicServer svc :<|> staticServer
+server :: (MonadError ServantErr m, Service m) => ServerT API m
+server = dynamicServer :<|> staticServer
 

@@ -1,11 +1,12 @@
 {-# LANGUAGE Arrows #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Scruffy.Repository
     ( Repository(..)
-    , PGRepo(..)
-    , connectPGRepo
+    , PGRepoT(..)
+    , connectPGPool
     , Sorting(..)
     , SortOrder(..)
     , SortColumn(..)
@@ -15,6 +16,9 @@ module Scruffy.Repository
 
 import           Control.Arrow
 import           Control.Lens               as L
+import           Control.Monad.Except
+import           Control.Monad.Reader
+import qualified Control.Monad.Trans.Reader as Reader
 
 import           Data.Int
 import           Data.Maybe
@@ -98,12 +102,10 @@ extractCount :: Connection -> Select (Column a) -> IO Int
 extractCount c q = maybe 0 (fromIntegral :: Int64 -> Int) . listToMaybe <$>
     runQuery c (aggregate O.count q)
 
-class Repository a where
-    searchAlbums :: a -> AlbumSearchRequest -> IO ([SD.Album], Int)
-    searchBands :: a -> SearchRequest -> IO ([SD.Band], Int)
-    getBand :: a -> T.Text -> IO (Maybe SD.Band)
-
-newtype PGRepo = PGRepo { unRepo :: Pool Connection }
+class Repository m where
+    searchAlbums :: AlbumSearchRequest -> m ([SD.Album], Int)
+    searchBands :: SearchRequest -> m ([SD.Band], Int)
+    getBand :: T.Text -> m (Maybe SD.Band)
 
 data Sorting a = Sorting a SortOrder
     deriving Show
@@ -158,16 +160,27 @@ data AlbumSearchRequest =
                        , getAlbumSearchSorting :: Sorting SortColumn
                        }
 
-connectPGRepo :: ConnectInfo -> IO PGRepo
-connectPGRepo info = PGRepo <$>
+newtype (Monad m) => PGRepoT m a =
+    PGRepoT { runPGRepoT :: ReaderT (Pool Connection) m a }
+    deriving ( Functor, Applicative, Monad, MonadIO
+             , MonadReader (Pool Connection) )
+
+instance MonadError e m => MonadError e (PGRepoT m) where
+    throwError = PGRepoT . throwError
+
+    catchError x f =
+        let catcher = Reader.liftCatch catchError
+        in PGRepoT $ catcher (runPGRepoT x) (runPGRepoT <$> f)
+
+connectPGPool :: ConnectInfo -> IO (Pool Connection)
+connectPGPool info =
     createPool (connect info) close 1 10 10
 
-withConn :: PGRepo -> (Connection -> IO b) -> IO b
-withConn repo = withResource (unRepo repo)
+withConn :: (MonadIO m, Monad m) => (Connection -> IO b) -> PGRepoT m b
+withConn f = liftIO . (`withResource` f) =<< ask
 
-instance Repository PGRepo where
-    searchAlbums repo
-                 AlbumSearchRequest{ getAlbumSearchRating = (rLower, rUpper)
+instance (Monad m, MonadIO m) => Repository (PGRepoT m) where
+    searchAlbums AlbumSearchRequest{ getAlbumSearchRating = (rLower, rUpper)
                                    , getAlbumSearchYear =
                                          (yLower, yUpper, includeUnknown)
                                    , getAlbumSearchSorting = sorting
@@ -181,28 +194,26 @@ instance Repository PGRepo where
                    restrict -< bandName .=~ n .|| albumName .=~ n
                    restrict
                        -< between rating (sqlDouble rLower) (sqlDouble rUpper)
-                   restrict
-                       -< between year (nullInt4 yLower) (nullInt4 yUpper)
+                   restrict -< between year (nullInt4 yLower) (nullInt4 yUpper)
                        .|| (isNull year .&& sqlBool includeUnknown)
-                   returnA -< (row , bandName)
-            sorter =
-                let Sorting column order = sorting
-                    direction Asc = O.asc
-                    direction Desc = O.desc
-                in orderBy $
-                   case column of
-                       AlbumName -> direction order (^. _1 . _1)
-                       Year -> direction order (^. _1 . _2)
-                       Rating -> direction order (^. _1 . _3)
-                       BandName -> direction order (^. _2)
+                   returnA -< (row, bandName)
+            Sorting column order = sorting
+            direction Asc = O.asc
+            direction Desc = O.desc
+            sorter = orderBy $
+                case column of
+                    AlbumName -> direction order (^. _1 . _1)
+                    Year -> direction order (^. _1 . _2)
+                    Rating -> direction order (^. _1 . _3)
+                    BandName -> direction order (^. _2)
             convertResult (albumRow, bandName) = convertRowToAlbum albumRow
                 & SD.band . _Just . SD.name .~ bandName
             search conn = fmap convertResult <$>
                 runQuery conn (paginate p ipp $ sorter baseQuery)
             count' c = extractCount c $ (^. _1 . _1) <$> baseQuery
-        in repo `withConn` \conn -> (,) <$> search conn <*> count' conn
+        in withConn $ \c -> (,) <$> search c <*> count' c
 
-    searchBands repo (SearchRequest p ipp n) =
+    searchBands (SearchRequest p ipp n) =
         let baseQuery = proc () ->
                 do row@(_, name, _, _) <- bandSelect -< ()
                    restrict -< name .=~ n
@@ -210,9 +221,9 @@ instance Repository PGRepo where
             search c = fmap convertRowToBand <$>
                 runQuery c (paginate p ipp $ orderBy (asc (^. _2)) baseQuery)
             count' c = extractCount c $ (^. _1) <$> baseQuery
-        in repo `withConn` \c -> (,) <$> search c <*> count' c
+        in withConn $ \c -> (,) <$> search c <*> count' c
 
-    getBand repo partialURL =
+    getBand partialURL =
         let bandQuery = proc () ->
                 do row <- bandSelect -< ()
                    restrict -< row ^. _1 .== pgStrictText partialURL
@@ -220,13 +231,14 @@ instance Repository PGRepo where
             albumsQuery = proc () ->
                 do row@(_, _, _, band, _) <- albumSelect -< ()
                    restrict -< band .== pgStrictText partialURL
-                   returnA -< row 
+                   returnA -< row
             populateAlbums c band =
                 do asR <- runQuery c albumsQuery
                    let as = (SD.band .~ Nothing) . convertRowToAlbum <$> asR
                    pure $ band & SD.albums .~ as
-        in repo
-           `withConn` \c -> runQuery c bandQuery
-           >>= (mapM (populateAlbums c . convertRowToBand) . listToMaybe)
+        in withConn $
+           \c -> do as <- runQuery c bandQuery
+                    mapM (populateAlbums c . convertRowToBand) $ listToMaybe as
+
 
 

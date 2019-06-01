@@ -1,15 +1,19 @@
+{-# LANGUAGE UndecidableInstances #-}
+
 module Scruffy.Service
     ( Service(..)
     , SearchRequest(..)
     , AlbumSearchRequest(..)
-    , BasicService(..)
+    , ServiceT(..)
     ) where
 
-import           Data.Maybe
-import           Data.Text          as T
+import           Control.Monad.Except
 
-import qualified Scruffy.Data       as SD
-import qualified Scruffy.Repository as R
+import           Data.Maybe
+import           Data.Text            as T
+
+import qualified Scruffy.Data         as SD
+import qualified Scruffy.Repository   as R
 
 data SearchRequest =
     SearchRequest { page         :: Maybe Int
@@ -44,19 +48,20 @@ convertASR (AlbumSearchRequest base yL yU yUn rL rU sC) =
                          (fromMaybe 0 rL, fromMaybe 10 rU)
                          (fromMaybe (R.Sorting R.Rating R.Desc) sC)
 
-class Service a where
-    searchBands :: a -> SearchRequest -> IO (SD.SearchResult SD.Band)
-    searchAlbums :: a -> AlbumSearchRequest -> IO (SD.SearchResult SD.Album)
-    getBand :: a -> T.Text -> IO (Maybe SD.Band)
+class Service m where
+    searchBands :: SearchRequest -> m (SD.SearchResult SD.Band)
+    searchAlbums :: AlbumSearchRequest -> m (SD.SearchResult SD.Album)
+    getBand :: T.Text -> m (Maybe SD.Band)
 
-newtype R.Repository a => BasicService a =
-    BasicService { unRepo :: a }
+newtype (Monad m, MonadIO m, R.Repository m) => ServiceT m a =
+    ServiceT { runServiceT :: m a }
+    deriving ( Functor, Applicative, Monad, MonadIO, R.Repository )
 
-instance R.Repository a => Service (BasicService a) where
-    searchAlbums svc req = uncurry SD.SearchResult <$>
-        R.searchAlbums (unRepo svc) (convertASR req)
+instance (Monad m, R.Repository m) => Service (ServiceT m) where
+    searchAlbums req = uncurry SD.SearchResult <$>
+        R.searchAlbums (convertASR req)
 
-    searchBands svc req = uncurry SD.SearchResult <$>
-        R.searchBands (unRepo svc) (convertSR req)
+    searchBands req = uncurry SD.SearchResult <$>
+        R.searchBands (convertSR req)
 
-    getBand svc = R.getBand (unRepo svc)
+    getBand = R.getBand

@@ -62,7 +62,10 @@ executable scruffy-server
   -- LANGUAGE extensions used by modules in this package.
   -- other-extensions:    
   
-  default-extensions:  OverloadedStrings
+  default-extensions:  OverloadedStrings,
+                       FlexibleInstances,
+                       MultiParamTypeClasses,
+                       GeneralizedNewtypeDeriving
   ghc-options:         -W
                        -Wall
                        -Werror
@@ -91,6 +94,7 @@ executable scruffy-server
                        postgresql-simple,
                        product-profunctors,
                        mtl,
+                       transformers,
                        resource-pool,
                        servant,
                        servant-server,
