@@ -20,6 +20,7 @@ import           Network.Wai.Middleware.RequestLogger
 import           Network.Wai.Middleware.RequestLogger.JSON
 
 import           Scruffy.API
+import qualified Scruffy.Data                              as SD
 import qualified Scruffy.Repository                        as R
 import qualified Scruffy.Service                           as S
 
@@ -27,33 +28,37 @@ import           Servant.Server                            as SS
 
 import           System.Posix.Signals
 
-runPGRepoT :: MonadIO m => R.PGRepoT m a -> Pool Connection -> m a
+type PoolReader a =
+    ReaderT (Pool Connection) a
+
+type PostgresM a =
+    R.PGRepoT (PoolReader a)
+
+type App = ServerT API (S.ServiceT (PostgresM (ExceptT SD.Error IO)))
+
+runPGRepoT
+    :: (MonadIO m, MonadError SD.Error m)
+    => PostgresM m a
+    -> Pool Connection
+    -> m a
 runPGRepoT x = runReaderT (R.runPGRepoT x)
 
 runServiceT
-    :: (MonadIO m) => S.ServiceT (R.PGRepoT m) a -> Pool Connection -> m a
+    :: (MonadIO m, MonadError SD.Error m)
+    => S.ServiceT (PostgresM m) a
+    -> Pool Connection
+    -> m a
 runServiceT x = runPGRepoT (S.runServiceT x)
 
-nt :: Pool Connection -> AppM a -> SS.Handler a
-nt pool app' = SS.Handler $ ExceptT $
-    runServiceT (runExceptT $ runAppT app') pool
-
-newtype AppM a =
-    AppM { runAppT :: ExceptT ServantErr (S.ServiceT (R.PGRepoT IO)) a }
-    deriving ( Functor, Applicative, Monad, MonadError ServantErr )
-
-instance S.Service AppM where
-    searchAlbums r = AppM $
-        ExceptT (Right <$> S.searchAlbums r)
-
-    searchBands r = AppM $
-        ExceptT (Right <$> S.searchBands r)
-
-    getBand v = AppM $ ExceptT (Right <$> S.getBand v)
+nt :: Pool Connection
+   -> S.ServiceT (PostgresM (ExceptT SD.Error IO)) a
+   -> SS.Handler a
+nt pool app' =
+    SS.Handler $ withExceptT SD.convertToServantErr $ runServiceT app' pool
 
 app :: Pool Connection -> Application
 app s = serve api $
-    hoistServer api (nt s) (server :: ServerT API AppM)
+    hoistServer api (nt s) (server :: App)
 
 waitForStop :: IO b -> IO a -> IO ()
 waitForStop ioAction cleanup =
@@ -70,5 +75,6 @@ main =
            def { outputFormat = CustomOutputFormatWithDetails formatAsJSON }
        let settings = setPort (port conf) defaultSettings
        let application = logger $ app pool
-       waitForStop (runSettings settings application)
-                   (destroyAllResources  pool)
+       waitForStop (do putStrLn $ "listening on " ++ show (port conf)
+                       runSettings settings application)
+                   (destroyAllResources pool)

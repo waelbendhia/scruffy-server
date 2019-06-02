@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -8,6 +9,9 @@ module Scruffy.Data
     ( Album(..)
     , Band(..)
     , SearchResult(..)
+    , Error(..)
+    , convertToServantErr
+    , liftMaybeToError
     , bio
     , name
     , url
@@ -22,6 +26,7 @@ module Scruffy.Data
 
 import           Control.Lens
 import           Control.Monad
+import           Control.Monad.Except
 
 import           Data.Aeson
 import           Data.Aeson.TH
@@ -30,10 +35,22 @@ import qualified Data.Text                   as T
 
 import           GHC.Generics
 
+import           Servant.Server
+
 import           Text.Blaze.Html
 import qualified Text.Blaze.Html5            as H
 import qualified Text.Blaze.Html5.Attributes as HA
 import           Text.Blaze.Internal
+
+data Error = NotFound
+
+liftMaybeToError :: MonadError Error m => Maybe a -> m a
+liftMaybeToError =
+    maybe (throwError NotFound) pure
+
+convertToServantErr
+    :: Error -> ServantErr
+convertToServantErr NotFound = err404 { errBody = "not found" }
 
 data Band =
     Band { _url          :: T.Text
@@ -83,9 +100,14 @@ instance ToMarkupElem Album where
            H.img ! HA.src (H.textValue $ fromMaybe "" $ a ^. imageUrl)
            maybe (pure ()) (H.h3 . toHtml) (bandName a)
 
+bandLink :: Band -> Attribute
+bandLink b = HA.href $
+    H.textValue $
+    T.intercalate "/" [ "/api", "bands", T.takeWhile (/= '.') $ b ^. url ]
+
 instance ToMarkupElem Band where
     toMarkupElem b = H.div $
-        do H.h1 $ toHtml $ b ^. name
+        do H.h1 $ H.a ! bandLink b $ toHtml $ b ^. name
            H.img ! HA.src (H.textValue $ fromMaybe "" $ b ^. imageUrl)
            maybe (pure ()) (H.p . toHtml) (b ^. bio)
            H.div $ forM_ (b ^. albums) toMarkupElem
@@ -104,5 +126,4 @@ baseLayout body =
        H.header $ H.h1 "Scaruffi2.0"
        H.body body
        H.footer "this be a footer"
-
 

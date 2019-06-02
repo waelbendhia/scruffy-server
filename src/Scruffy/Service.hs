@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Scruffy.Service
@@ -51,11 +52,19 @@ convertASR (AlbumSearchRequest base yL yU yUn rL rU sC) =
 class Service m where
     searchBands :: SearchRequest -> m (SD.SearchResult SD.Band)
     searchAlbums :: AlbumSearchRequest -> m (SD.SearchResult SD.Album)
-    getBand :: T.Text -> m (Maybe SD.Band)
+    getBand :: T.Text -> m SD.Band
 
-newtype (Monad m, MonadIO m, R.Repository m) => ServiceT m a =
+newtype (Monad m, MonadIO m, R.Repository m, MonadError SD.Error m)
+    => ServiceT m a =
     ServiceT { runServiceT :: m a }
     deriving ( Functor, Applicative, Monad, MonadIO, R.Repository )
+
+instance (MonadError SD.Error m, MonadIO m, R.Repository m)
+    => MonadError SD.Error (ServiceT m) where
+    throwError = ServiceT . throwError
+
+    catchError x f = ServiceT $
+        catchError (runServiceT x) (runServiceT <$> f)
 
 instance (Monad m, R.Repository m) => Service (ServiceT m) where
     searchAlbums req = uncurry SD.SearchResult <$>

@@ -50,14 +50,10 @@ type API = DynamicAPI :<|> StaticAPI
 api :: Proxy API
 api = Proxy
 
-bandsServer :: (MonadError ServantErr m, Service m) => ServerT BandsAPI m
+bandsServer :: (MonadError Error m, Service m) => ServerT BandsAPI m
 bandsServer =
     let bandsEndpoint mN mP mIPP = searchBands $ SearchRequest mP mIPP mN
-        bandEndpoint vol path =
-            do res <- getBand $ T.concat [ vol, "/", path, ".html" ]
-               maybe (throwError err404 { errBody = "band not found" })
-                     pure
-                     res
+        bandEndpoint vol path = (getBand $ T.concat [ vol, "/", path, ".html" ])
     in bandsEndpoint :<|> bandEndpoint
 
 albumsServer :: Service m => ServerT AlbumsAPI m
@@ -73,12 +69,12 @@ albumsServer =
                                }
     in albumsEndpoint
 
-dynamicServer :: (MonadError ServantErr m, Service m) => ServerT DynamicAPI m
+dynamicServer :: (MonadError Error m, Service m) => ServerT DynamicAPI m
 dynamicServer = bandsServer :<|> albumsServer
 
 staticServer :: (Monad m, Service m) => ServerT StaticAPI m
 staticServer = pure stylesheet
 
-server :: (MonadError ServantErr m, Service m) => ServerT API m
+server :: (MonadError Error m, Service m) => ServerT API m
 server = dynamicServer :<|> staticServer
 

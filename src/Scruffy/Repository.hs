@@ -16,9 +16,8 @@ module Scruffy.Repository
 
 import           Control.Arrow
 import           Control.Lens               as L
-import           Control.Monad.Except
+import           Control.Monad.Except as E
 import           Control.Monad.Reader
-import qualified Control.Monad.Trans.Reader as Reader
 
 import           Data.Int
 import           Data.Maybe
@@ -105,7 +104,7 @@ extractCount c q = maybe 0 (fromIntegral :: Int64 -> Int) . listToMaybe <$>
 class Repository m where
     searchAlbums :: AlbumSearchRequest -> m ([SD.Album], Int)
     searchBands :: SearchRequest -> m ([SD.Band], Int)
-    getBand :: T.Text -> m (Maybe SD.Band)
+    getBand :: T.Text -> m SD.Band
 
 data Sorting a = Sorting a SortOrder
     deriving Show
@@ -160,26 +159,27 @@ data AlbumSearchRequest =
                        , getAlbumSearchSorting :: Sorting SortColumn
                        }
 
-newtype (Monad m) => PGRepoT m a =
-    PGRepoT { runPGRepoT :: ReaderT (Pool Connection) m a }
-    deriving ( Functor, Applicative, Monad, MonadIO
-             , MonadReader (Pool Connection) )
+newtype (Monad m, MonadReader (Pool Connection) m, MonadError SD.Error m)
+    => PGRepoT m a = PGRepoT { runPGRepoT :: m a }
+    deriving ( Functor, Applicative, Monad, MonadIO )
 
-instance MonadError e m => MonadError e (PGRepoT m) where
+instance (MonadReader (Pool Connection) m, MonadError SD.Error m)
+    => MonadError SD.Error (PGRepoT m) where
     throwError = PGRepoT . throwError
-
-    catchError x f =
-        let catcher = Reader.liftCatch catchError
-        in PGRepoT $ catcher (runPGRepoT x) (runPGRepoT <$> f)
+    catchError x f= PGRepoT $ catchError (runPGRepoT x) (runPGRepoT <$> f)
 
 connectPGPool :: ConnectInfo -> IO (Pool Connection)
 connectPGPool info =
     createPool (connect info) close 1 10 10
 
-withConn :: (MonadIO m, Monad m) => (Connection -> IO b) -> PGRepoT m b
-withConn f = liftIO . (`withResource` f) =<< ask
+withConn
+    :: (MonadReader (Pool Connection) m,  MonadError SD.Error m, MonadIO m)
+    => (Connection -> IO b)
+    -> PGRepoT m b
+withConn f = liftIO . (`withResource` f) =<< PGRepoT ask
 
-instance (Monad m, MonadIO m) => Repository (PGRepoT m) where
+instance ( MonadReader (Pool Connection) m, MonadError SD.Error m, MonadIO m)
+    => Repository (PGRepoT m) where
     searchAlbums AlbumSearchRequest{ getAlbumSearchRating = (rLower, rUpper)
                                    , getAlbumSearchYear =
                                          (yLower, yUpper, includeUnknown)
@@ -236,9 +236,8 @@ instance (Monad m, MonadIO m) => Repository (PGRepoT m) where
                 do asR <- runQuery c albumsQuery
                    let as = (SD.band .~ Nothing) . convertRowToAlbum <$> asR
                    pure $ band & SD.albums .~ as
-        in withConn $
-           \c -> do as <- runQuery c bandQuery
-                    mapM (populateAlbums c . convertRowToBand) $ listToMaybe as
-
-
+            getBand' c = do bs <- runQuery c bandQuery
+                            mapM (populateAlbums c . convertRowToBand) $ listToMaybe bs
+        in SD.liftMaybeToError =<< withConn getBand'
+                      
 
